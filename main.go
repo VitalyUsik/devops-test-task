@@ -6,14 +6,27 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
+
 	"github.com/go-redis/redis/v8"
 	"github.com/julienschmidt/httprouter"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
-	"time"
+)
+
+var (
+	requestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "http_request_duration_seconds",
+			Help: "Duration of HTTP requests.",
+		},
+		[]string{"handler", "method", "status"},
+	)
 )
 
 type server struct {
-	redis redis.UniversalClient
+	redis  redis.UniversalClient
 	logger *zap.Logger
 }
 
@@ -30,19 +43,36 @@ func main() {
 	})
 
 	srv := &server{
-		redis: rdb,
+		redis:  rdb,
 		logger: logger,
 	}
 
 	router := httprouter.New()
 
-	router.GET("/", srv.indexHandler)
+	// Wrap the handler with promhttp.InstrumentHandlerDuration
+	router.GET("/", prometheusHandler(srv.indexHandler))
+	router.GET("/health", srv.healthCheckHandler)
+	router.Handler("GET", "/metrics", promhttp.Handler())
 
 	logger.Info("server started on port 8080")
 	log.Fatal(http.ListenAndServe(":8080", router))
 }
 
-func (s *server) indexHandler(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+// prometheusHandler wraps the given handler with Prometheus instrumentation.
+func prometheusHandler(h http.HandlerFunc) httprouter.Handle {
+	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		promhttp.InstrumentHandlerDuration(
+			requestDuration,
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				h(w, r)
+			}),
+		).ServeHTTP(w, r)
+	}
+}
+
+func (s *server) indexHandler(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
 	var v string
 	var err error
 	if v, err = s.redis.Get(context.Background(), "updated_time").Result(); err != nil {
@@ -55,4 +85,12 @@ func (s *server) indexHandler(w http.ResponseWriter, r *http.Request, _ httprout
 
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "hello world: updated_time=%s\n", v)
+
+	duration := time.Since(start).Seconds()
+	requestDuration.WithLabelValues("indexHandler", r.Method, fmt.Sprintf("%d", http.StatusOK)).Observe(duration)
+}
+
+func (s *server) healthCheckHandler(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
 }
