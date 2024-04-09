@@ -16,10 +16,10 @@ import (
 )
 
 var (
-	requestDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name: "http_request_duration_seconds",
-			Help: "Duration of HTTP requests.",
+	httpRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_requests_total",
+			Help: "Total number of HTTP requests.",
 		},
 		[]string{"handler", "method", "status"},
 	)
@@ -61,17 +61,16 @@ func main() {
 // prometheusHandler wraps the given handler with Prometheus instrumentation.
 func prometheusHandler(h http.HandlerFunc) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		promhttp.InstrumentHandlerDuration(
-			requestDuration,
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				h(w, r)
-			}),
-		).ServeHTTP(w, r)
+		h(w, r) // Call the original handler first
+
+		// Extract relevant labels from the request and increment the counter
+		labels := []string{"indexHandler", r.Method, fmt.Sprintf("%d", http.StatusOK)}
+		httpRequestsTotal.WithLabelValues(labels...).Inc()
 	}
 }
 
+
 func (s *server) indexHandler(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
 
 	var v string
 	var err error
@@ -86,8 +85,7 @@ func (s *server) indexHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "hello world: updated_time=%s\n", v)
 
-	duration := time.Since(start).Seconds()
-	requestDuration.WithLabelValues("indexHandler", r.Method, fmt.Sprintf("%d", http.StatusOK)).Observe(duration)
+	httpRequestsTotal.WithLabelValues("indexHandler", r.Method, fmt.Sprintf("%d", http.StatusOK)).Inc()
 }
 
 func (s *server) healthCheckHandler(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
